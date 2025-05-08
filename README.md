@@ -4,7 +4,7 @@
 
 Welcome to **S4V (Security 4 RISC-V)**! 
 
-This repository serves as a collection of various Transient Execution Attacks (TEAs) implementations specifically tailored for RISC-V architectures. The goal is to provide researchers, students, and security engineers with practical examples and templates for understanding and experimenting with these types of vulnerabilities on RISC-V processors.
+This repository serves as a collection of various Transient Execution Attacks (TEAs) PoC implementations specifically tailored for RISC-V architectures. The goal is to provide researchers, students, and security engineers with practical PoC examples and templates for understanding and experimenting with these types of vulnerabilities on RISC-V processors.
 
 ## Background
 
