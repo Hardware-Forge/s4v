@@ -9,7 +9,7 @@
 # This load into array2 creates the cache side-channel leakage.
 gadget:
     la a4,  array1          # Load base address of array1 into a4
-    lw a5,  passInIdx       # Load the value of passInIdx into a5 (index for array1)
+    ld a5,  passInIdx       # Load the value of passInIdx into a5 (index for array1)
     add a5, a5, a4          # Calculate address: array1 + index
     lbu a5, 0(a5)           # Load byte value: data = array1[index]
     # --- Calculate offset for array2 based on loaded data ---
