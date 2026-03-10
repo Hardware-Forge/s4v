@@ -10,32 +10,9 @@ This repository contains a collection of Proof-of-Concept (PoC) implementations 
 
 **Transient Execution Attacks**, such as **Spectre** and **Meltdown**, exploit the speculative execution features of modern processors to leak sensitive information that should normally be inaccessible. While initially discovered on other architectures, RISC-V, as a modern and increasingly popular ISA, is also susceptible to similar vulnerabilities depending on its specific microarchitecture implementation. This repository explores some of these attack vulnerabilities on RISC-V cores.
 
-## Repository Structure
-
-The repository is organized into two main folders:
-
-1.  **`Template/`**: This folder contains generic "skeleton" implementations for various transient execution attack vulnerabilities. These templates provide the core logic for each attack type and are designed to be adaptable for different RISC-V processor implementations. They serve as a starting point for developing new vulnerability testing instances or porting existing ones.
-2.  **`Processors/`**: This folder contains specific implementations of vulnerabilities targeting particular RISC-V processor cores. Currently, implementations are provided for:
-    * **`BOOM/`**: Attack vulnerabilities specifically implemented and tested against the Berkeley Out-of-Order Machine (BOOM) core.
-
 ## Implemented Attacks
 
 This repository includes implementations (or templates) for the following transient execution attack vulnerabilities:
-
-**Templates (`Template/`)**:
-
-* Meltdown
-* Spectre V1 (Bounds Check Bypass / Conditional Branch Misprediction)
-* Spectre V2 (Branch Target Injection / Indirect Branch Misprediction)
-* Spectre V4 (Speculative Store Bypass - SSB)
-* Spectre-RSB (Return Stack Buffer)
-* RetBleed
-* SCSB (Speculative Code Store Bypass)
-* Misaligned Meltdown
-* Load Value Injection (LVI)
-* Inception
-* Indirector
-* *Under Development:* Crosstalk, SLAM, TikTag, Foreshadow, ZombieLoad, ZenBleed, Ghostrace, Downfall, FPVI.
 
 **Processor-Specific (`Processors/`)**:
 
